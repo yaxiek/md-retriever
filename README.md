@@ -45,8 +45,8 @@
 
 3. （任意）システムのパスが通った場所に配置します。  
    ```bash
-   sudo mv md-retriever.sh /usr/local/bin/md-retriever
-   sudo mv md_retriever.py /usr/local/bin/
+   sudo cp md-retriever.sh /usr/local/bin/md-retriever
+   sudo cp md_retriever.py /usr/local/bin/
    ```
 
    これでどこからでも実行できます。
