@@ -1,0 +1,23 @@
+# .md-retriever/config.toml
+# md-retriever の標準設定ファイルサンプル
+# CLI > TOML > デフォルト の優先度で上書きされます。
+
+# 出力ファイル名
+output = "index.md"
+
+# 差し替えマーカー
+marker_start = "<!-- AUTO-TOC START -->"
+marker_end   = "<!-- AUTO-TOC END -->"
+
+# 新規作成時のタイトル（任意）
+title = "Documentation Index"
+
+# 内蔵の除外リストを無効化する場合は true にする
+# no_default_excludes = true
+
+# 除外したいパターン（glob対応）
+excludes = [
+  ".obsidian",
+  "build",
+  "dist",
+]
