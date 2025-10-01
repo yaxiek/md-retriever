@@ -2,7 +2,7 @@
 # md_retriever.py — 指定ディレクトリ配下の .md を列挙し、ツリーのリンク集を出力
 # 設定は config.toml（--config）で読み込み可能。CLI > TOML > デフォルトで上書き。
 
-import argparse, os, sys, fnmatch, textwrap
+import argparse, os, sys, fnmatch, textwrap, subprocess
 
 # --- TOML ローダ（Python 3.11+: tomllib / それ以前: tomli があれば使用） ---
 def load_toml(path):
@@ -108,64 +108,131 @@ def merge_config(cli, toml_obj):
 
     return merged
 
+class GitCheckIgnore:
+    """Fallback matcher that shells out to `git check-ignore` when pathspec is unavailable."""
+    def __init__(self, root):
+        self.root = root
+        self._cache = {}
+        self.available = self._probe()
+
+    def _probe(self):
+        try:
+            subprocess.run(
+                ["git", "-C", self.root, "rev-parse", "--is-inside-work-tree"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            return True
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            return False
+
+    def matches(self, relpath, is_dir=False):
+        if not self.available:
+            return False
+        normalized = relpath[:-1] if relpath.endswith('/') else relpath
+        cache_key = (normalized, is_dir)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        path_for_git = normalized + ('/' if is_dir and not normalized.endswith('/') else '')
+        try:
+            proc = subprocess.run(
+                ["git", "-C", self.root, "check-ignore", "--stdin"],
+                input=path_for_git + '\n',
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            self.available = False
+            self._cache[cache_key] = False
+            return False
+        if proc.returncode == 0:
+            ignored = bool(proc.stdout.strip())
+        elif proc.returncode == 1:
+            ignored = False
+        else:
+            self.available = False
+            ignored = False
+        self._cache[cache_key] = ignored
+        return ignored
+
+
 def load_gitignore_spec(root):
-    """Load all .gitignore rules under root into a single pathspec.
-    Rules keep their directory context by prefixing patterns with the .gitignore's relative dir when needed.
-    Returns a pathspec.PathSpec or None.
+    """Load .gitignore rules under root.
+
+    Prefer `pathspec` when available for full gitwildmatch support.
+    Fallback to invoking `git check-ignore` if pathspec is missing but git is accessible.
     """
     try:
         import pathspec
     except ModuleNotFoundError:
-        return None
+        pathspec = None
 
     patterns = []
+    found_any = False
     root = os.path.abspath(root)
     for dirpath, dirnames, filenames in os.walk(root):
+        if ".git" in dirnames:
+            dirnames.remove(".git")
         if ".gitignore" in filenames:
+            found_any = True
+            if not pathspec:
+                continue
             reldir = os.path.relpath(dirpath, root)
-            # read lines
             fp = os.path.join(dirpath, ".gitignore")
             try:
                 with open(fp, "r", encoding="utf-8") as f:
                     for line in f:
-                        s = line.rstrip("\n")
+                        s = line.rstrip('\n')
                         if not s or s.lstrip().startswith('#'):
                             continue
                         neg = s.startswith('!')
                         raw = s[1:] if neg else s
-                        # Normalize root-anchored vs relative patterns
                         if raw.startswith('/'):
-                            # Root-anchored pattern relative to repo root
                             norm = raw.lstrip('/')
                         else:
-                            base = (reldir if reldir != '.' else '')
+                            base = reldir if reldir != '.' else ''
                             norm = os.path.join(base, raw).replace('\\', '/')
                         pat = ('!' if neg else '') + norm
                         patterns.append(pat)
             except Exception:
                 continue
-    if not patterns:
-        return None
-    try:
-        import pathspec
-        return pathspec.PathSpec.from_lines('gitwildmatch', patterns)
-    except Exception:
-        return None
+    if pathspec and patterns:
+        try:
+            return pathspec.PathSpec.from_lines('gitwildmatch', patterns)
+        except Exception:
+            pass
+    if found_any:
+        matcher = GitCheckIgnore(root)
+        if matcher.available:
+            return matcher
+    return None
+
+
+def git_spec_matches(git_spec, relpath, is_dir):
+    if git_spec is None:
+        return False
+    relpath_norm = relpath.replace(os.sep, '/')
+    if is_dir and not relpath_norm.endswith('/'):
+        relpath_norm += '/'
+    if hasattr(git_spec, 'match_file'):
+        return git_spec.match_file(relpath_norm)
+    if hasattr(git_spec, 'matches'):
+        return git_spec.matches(relpath_norm, is_dir=is_dir)
+    return False
+
 
 def should_exclude(name, relpath, patterns, git_spec=None, is_dir=False):
-    # Git ignore takes precedence when provided
-    if git_spec is not None:
-        relpath_norm = relpath.replace(os.sep, '/')
-        if is_dir and not relpath_norm.endswith('/'):
-            relpath_norm += '/'
-        if git_spec.match_file(relpath_norm):
-            return True
+    if git_spec_matches(git_spec, relpath, is_dir):
+        return True
     for pat in patterns:
         if fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(relpath, pat):
             return True
         if relpath.startswith(pat.rstrip('/')) and pat.endswith('/**'):
             return True
     return False
+
 
 def scan_md(root, excludes, git_spec=None):
     md = []
